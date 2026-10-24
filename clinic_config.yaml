@@ -1,0 +1,36 @@
+name: Willow Dental & Medical
+timezone: America/New_York
+currency: USD
+address: 125 Willow Avenue, Suite 200, Springfield, MA 01103
+hours:
+  monday: {open: "09:00", close: "17:00"}
+  tuesday: {open: "09:00", close: "17:00"}
+  wednesday: {open: "09:00", close: "17:00"}
+  thursday: {open: "09:00", close: "17:00"}
+  friday: {open: "09:00", close: "16:00"}
+  saturday: null
+  sunday: null
+services:
+  - id: dental_exam
+    name: Dental exam and consultation
+    price: 95
+    duration_minutes: 30
+  - id: cleaning
+    name: Routine dental cleaning
+    price: 150
+    duration_minutes: 60
+  - id: general_consultation
+    name: General medical consultation
+    price: 120
+    duration_minutes: 30
+insurance:
+  - Delta Dental
+  - Cigna
+  - Aetna
+emergency_policy: >-
+  This receptionist cannot assess symptoms or provide medical advice. For an
+  emergency, stop the booking process and tell the caller to hang up and dial
+  their local emergency service immediately: 911 in the US/Canada, 000 in
+  Australia, or 999 in the UK. Do not claim to transfer or dispatch help.
+  For non-emergency clinical questions, offer to take a message for clinic staff.
+emergency_numbers: ["911", "000", "999"]

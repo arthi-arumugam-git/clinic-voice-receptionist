@@ -1,0 +1,43 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+!site/.env.example
+*.pem
+*.key
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Call records and exports (may contain personal data)
+data/
+exports/
+*.db
+*.db-*
+*.sqlite*
+*.csv
+*.log
+
+# Frontend
+node_modules/
+.next/
+out/
+.vercel/
+*.tsbuildinfo
+
+# Local tooling
+.DS_Store
+.idea/
+.vscode/
+.omx/
+.playwright/
+test-results/
