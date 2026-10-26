@@ -1,0 +1,53 @@
+# Dubai / UAE Demo Configuration
+# Use this profile for Middle East demonstrations and the Dubai Create AI Agents Championship.
+# Set CLINIC_CONFIG_PATH=profiles/dubai.yaml or CLINIC_PROFILE=dubai to use.
+
+name: Al Noor Medical Centre
+timezone: Asia/Dubai
+currency: AED
+address: Sheikh Zayed Road, Trade Centre 2, Dubai, UAE
+
+hours:
+  sunday: {open: "09:00", close: "21:00"}
+  monday: {open: "09:00", close: "21:00"}
+  tuesday: {open: "09:00", close: "21:00"}
+  wednesday: {open: "09:00", close: "21:00"}
+  thursday: {open: "09:00", close: "21:00"}
+  friday: {open: "14:00", close: "21:00"}
+  saturday: {open: "09:00", close: "21:00"}
+
+services:
+  - id: dental_exam
+    name: Dental examination and consultation
+    price: 350
+    duration_minutes: 30
+  - id: cleaning
+    name: Professional dental cleaning
+    price: 550
+    duration_minutes: 60
+  - id: general_consultation
+    name: General medical consultation
+    price: 450
+    duration_minutes: 30
+  - id: specialist_consultation
+    name: Specialist consultation
+    price: 650
+    duration_minutes: 45
+
+insurance:
+  - Daman
+  - ADNIC
+  - Oman Insurance
+  - AXA Gulf
+  - MetLife
+
+emergency_policy: >-
+  This receptionist cannot assess symptoms or provide medical advice. For an
+  emergency, stop the booking process and tell the caller to hang up and dial
+  their local emergency service immediately: 999 for police, 998 for ambulance,
+  or 997 for fire in the UAE. Do not claim to transfer or dispatch help.
+  For non-emergency clinical questions, offer to take a message for clinic staff.
+
+# UAE emergency numbers: 999 (Police), 998 (Ambulance), 997 (Fire), 901 (DHA Health Authority)
+# Must include the international defaults for validation.
+emergency_numbers: ["999", "998", "997", "901", "911", "000"]

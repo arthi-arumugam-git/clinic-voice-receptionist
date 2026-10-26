@@ -7,8 +7,9 @@ from contextlib import suppress
 
 from dotenv import load_dotenv
 
-from config import ClinicConfig, load_config
-from notify import send_summary
+from calendars import CalendarService, get_calendar_provider
+from config import ClinicConfig, build_system_prompt, load_config
+from notify import send_escalation_alert, send_summary
 from settings import ROOT, env_value, local_path, max_call_seconds, require_voice_settings
 from store import Store
 from tools import TOOL_SCHEMAS, ClinicTools
@@ -27,7 +28,7 @@ def configure_logging() -> None:
     logging.basicConfig(level=level)
 
 
-def build_services(config: ClinicConfig):
+def build_services(config: ClinicConfig, calendar_enabled: bool = False):
     """Construct the current service APIs without opening provider connections."""
     from pipecat.services.deepgram.stt import DeepgramSTTService
     from pipecat.services.openai.llm import OpenAILLMService
@@ -41,7 +42,7 @@ def build_services(config: ClinicConfig):
         api_key=env_value("OPENAI_API_KEY"),
         settings=OpenAILLMService.Settings(
             model=env_value("OPENAI_MODEL", "gpt-4o-mini"),
-            system_instruction=config.system_prompt(),
+            system_instruction=build_system_prompt(config, calendar_enabled=calendar_enabled),
         ),
     )
     if env_value("TTS_PROVIDER", "cartesia") == "elevenlabs":
@@ -74,7 +75,13 @@ def daily_params():
     return DailyParams(audio_in_enabled=True, audio_out_enabled=True)
 
 
-async def run_session(transport, runner_args, config: ClinicConfig, store: Store) -> None:
+async def run_session(
+    transport,
+    runner_args,
+    config: ClinicConfig,
+    store: Store,
+    calendar_service: CalendarService | None = None,
+) -> None:
     from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
     from pipecat.audio.vad.silero import SileroVADAnalyzer
     from pipecat.frames.frames import (
@@ -94,19 +101,48 @@ async def run_session(transport, runner_args, config: ClinicConfig, store: Store
 
     call_duration = max_call_seconds()
     call = store.create_call()
-    call_id = call["call_id"]  # Never use an LLM- or caller-supplied database identifier.
+    call_id = call["call_id"]
     status, reason = "completed", None
     ending = False
     runner = None
     deadline = None
+    escalation_queue: list[dict] = []
+
+    def on_escalation(escalation: dict) -> None:
+        escalation_queue.append(escalation)
+
     try:
-        stt, llm, tts = build_services(config)
-        clinic_tools = ClinicTools(config, store, call_id)
+        calendar_enabled = calendar_service is not None and calendar_service.provider.name != "mock"
+        stt, llm, tts = build_services(config, calendar_enabled=calendar_enabled)
+
+        clinic_tools = ClinicTools(
+            config,
+            store,
+            call_id,
+            calendar_service=calendar_service,
+            on_escalation=on_escalation,
+        )
 
         async def handle_tool(params: FunctionCallParams):
             nonlocal ending, reason
-            # The validated, transactional local operation finishes before an await.
             result = clinic_tools.dispatch(params.function_name, params.arguments)
+
+            if result.get("ok") and params.function_name == "book_appointment":
+                calendar_result = await clinic_tools.sync_calendar_booking()
+                if calendar_result:
+                    result["calendar"] = calendar_result
+                    if calendar_result.get("calendar_synced"):
+                        result["status"] = "confirmed"
+                        result["message"] = (
+                            "Your appointment has been booked and added to the clinic calendar. "
+                            f"Appointment confirmed for {result.get('local_start', 'the requested time')}."
+                        )
+
+            if escalation_queue:
+                for esc in escalation_queue:
+                    asyncio.create_task(send_escalation_alert(esc, config.name))
+                escalation_queue.clear()
+
             should_end = result.get("should_end", False)
             await params.result_callback(
                 result,
@@ -118,7 +154,6 @@ async def run_session(transport, runner_args, config: ClinicConfig, store: Store
                 goodbye = TTSSpeakFrame("Thank you for calling. Goodbye!")
                 goodbye.interruptible = False
                 await params.llm.push_frame(goodbye)
-                # Graceful closure flushes synthesis and playback before hanging up.
                 await params.llm.push_frame(EndWorkerFrame())
 
         schemas = []
@@ -214,6 +249,10 @@ async def bot(runner_args):
 
     require_voice_settings()
     config = load_config(local_path("CLINIC_CONFIG_PATH", "clinic_config.yaml"))
+
+    calendar_provider = get_calendar_provider()
+    calendar_service = CalendarService(provider=calendar_provider)
+
     transport = await create_transport(
         runner_args,
         {
@@ -222,8 +261,11 @@ async def bot(runner_args):
             "twilio": lambda: FastAPIWebsocketParams(audio_in_enabled=True, audio_out_enabled=True),
         },
     )
-    with Store(local_path("DATABASE_PATH", "data/clinic.sqlite3")) as store:
-        await run_session(transport, runner_args, config, store)
+    try:
+        with Store(local_path("DATABASE_PATH", "data/clinic.sqlite3")) as store:
+            await run_session(transport, runner_args, config, store, calendar_service)
+    finally:
+        await calendar_service.cleanup()
 
 
 if __name__ == "__main__":
