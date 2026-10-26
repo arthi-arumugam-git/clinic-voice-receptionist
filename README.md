@@ -202,10 +202,26 @@ The receptionist’s prompt prohibits diagnosis, treatment advice and symptom tr
 
 ## Development and verification
 
+For reproducible test runs with locked dependencies:
+
+```bash
+uv sync --extra dev --locked
+uv run pytest -q
+uv run ruff check . --exclude site
+uv run ruff format --check . --exclude site
+```
+
+Or with a standard virtual environment:
+
 ```bash
 python -m pytest -q
 ruff check . --exclude site
 ruff format --check . --exclude site
+```
+
+Additional verification:
+
+```bash
 python -m compileall -q bot.py server.py config.py store.py tools.py notify.py settings.py
 cd site && npm run build
 ```
