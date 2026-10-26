@@ -6,11 +6,59 @@ import re
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, time, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from config import WEEKDAYS, ClinicConfig
 from store import SlotUnavailable, Store
+
+if TYPE_CHECKING:
+    from calendar import CalendarService
+
+
+URGENCY_KEYWORDS = frozenset(
+    {
+        "emergency",
+        "urgent",
+        "critical",
+        "help",
+        "dying",
+        "unconscious",
+        "heart attack",
+        "stroke",
+        "bleeding",
+        "accident",
+        "ambulance",
+        "911",
+        "999",
+        "998",
+        "000",
+        "can't breathe",
+        "cannot breathe",
+        "choking",
+        "chest pain",
+        "severe pain",
+        "overdose",
+        "suicide",
+        "collapse",
+        "seizure",
+        "anaphylaxis",
+        "allergic reaction",
+        "poisoning",
+    }
+)
+
+
+def detect_urgency(text: str) -> tuple[bool, str | None]:
+    """Detect emergency/urgent keywords in caller speech.
+
+    Returns (is_urgent, matched_keyword).
+    """
+    text_lower = text.lower()
+    for keyword in URGENCY_KEYWORDS:
+        if keyword in text_lower:
+            return True, keyword
+    return False, None
 
 
 def _schema(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -50,7 +98,7 @@ TOOL_SCHEMAS = [
     ),
     _schema(
         "book_appointment",
-        "Save a LOCAL appointment REQUEST pending staff confirmation. Read back details and obtain explicit consent before confirmed=true. This does not book a live clinic calendar.",
+        "Book an appointment. When calendar integration is enabled, this creates a real calendar event. Otherwise saves a local request pending staff confirmation. Read back details and obtain explicit consent before confirmed=true.",
         {
             "patient_name": {"type": "string", "description": "Caller-provided patient name."},
             "phone": {
@@ -99,6 +147,26 @@ TOOL_SCHEMAS = [
         ["name", "phone", "message", "confirmed"],
     ),
     _schema(
+        "escalate_urgent",
+        "Flag an urgent or emergency situation for immediate staff attention. Use when the caller describes an emergency, medical crisis, or needs immediate help. This sends an alert to clinic staff with the caller's details. After calling this, direct the caller to hang up and call emergency services.",
+        {
+            "caller_phone": {
+                "type": "string",
+                "description": "Caller's phone number for staff to reach them.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Brief description of the urgent situation (e.g., 'chest pain', 'severe allergic reaction'). Do not include detailed medical history.",
+            },
+            "urgency_level": {
+                "type": "string",
+                "enum": ["emergency", "urgent", "high_priority"],
+                "description": "emergency: life-threatening, call 911/999; urgent: needs same-day attention; high_priority: needs callback within hours.",
+            },
+        },
+        ["caller_phone", "reason", "urgency_level"],
+    ),
+    _schema(
         "end_call",
         "End after saying a brief goodbye or giving emergency instructions. Do not claim to have transferred or dispatched help.",
         {
@@ -139,12 +207,17 @@ class ClinicTools:
         store: Store,
         call_id: str,
         now: Callable[[], datetime] | None = None,
+        calendar_service: CalendarService | None = None,
+        on_escalation: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.config, self.store, self.call_id = config, store, call_id
         self._zone = ZoneInfo(config.timezone)
         self._now = now or (lambda: datetime.now(UTC))
+        self._calendar = calendar_service
+        self._on_escalation = on_escalation
         self.end_requested = False
         self.end_reason: str | None = None
+        self.escalation_sent = False
         store.create_call(call_id)
 
     def dispatch(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -171,7 +244,7 @@ class ClinicTools:
                 "error": "invalid_arguments",
                 "message": "Arguments contain unknown fields or omit required fields.",
             }
-        if self.end_requested and name in {"book_appointment", "take_message"}:
+        if self.end_requested and name in {"book_appointment", "take_message", "escalate_urgent"}:
             return {
                 "ok": False,
                 "error": "call_ending",
@@ -239,8 +312,6 @@ class ClinicTools:
             raise ValueError("Use YYYY-MM-DD for the date and HH:MM for the time.")
         naive = datetime.fromisoformat(f"{appointment_date}T{appointment_time}")
         start = naive.replace(tzinfo=self._zone)
-        # A round trip detects clock-change gaps; differing valid folds indicate
-        # ambiguous local times that should be clarified instead of guessed.
         roundtrip = start.astimezone(UTC).astimezone(self._zone)
         if roundtrip.replace(tzinfo=None) != naive:
             raise ValueError(
@@ -266,6 +337,7 @@ class ClinicTools:
         )
         if start < opening or end > closing:
             raise ValueError("The full appointment must fit within clinic opening hours.")
+
         appointment = self.store.create_appointment(
             call_id=self.call_id,
             patient_name=patient_name,
@@ -275,13 +347,78 @@ class ClinicTools:
             duration_minutes=service.duration_minutes,
             notes=notes,
         )
+
+        self._pending_calendar_booking = {
+            "appointment_id": appointment["id"],
+            "title": f"{service.name} - {patient_name}",
+            "start": start,
+            "duration_minutes": service.duration_minutes,
+            "patient_name": patient_name,
+            "phone": phone,
+            "notes": notes,
+        }
+
+        has_calendar = self._calendar is not None and self._calendar.provider.name != "mock"
+
+        if has_calendar:
+            return {
+                "status": "pending_calendar_sync",
+                "appointment": appointment,
+                "local_start": start.isoformat(),
+                "timezone": self.config.timezone,
+                "message": "Appointment details captured. Calendar booking will be confirmed shortly.",
+                "calendar_enabled": True,
+            }
+
         return {
             "status": "pending_confirmation",
             "appointment": appointment,
             "local_start": start.isoformat(),
             "timezone": self.config.timezone,
             "message": "Appointment request saved locally, pending confirmation by clinic staff. This is not a confirmed booking.",
+            "calendar_enabled": False,
         }
+
+    async def sync_calendar_booking(self) -> dict[str, Any] | None:
+        """Sync pending booking to external calendar. Called after tool dispatch."""
+        if not hasattr(self, "_pending_calendar_booking") or not self._pending_calendar_booking:
+            return None
+
+        if not self._calendar:
+            return None
+
+        booking = self._pending_calendar_booking
+        self._pending_calendar_booking = None
+
+        result = await self._calendar.book_appointment(
+            title=booking["title"],
+            start=booking["start"],
+            duration_minutes=booking["duration_minutes"],
+            attendee_name=booking["patient_name"],
+            attendee_phone=booking["phone"],
+            notes=booking["notes"],
+            timezone=self.config.timezone,
+        )
+
+        if result.success and result.event:
+            self.store.update_appointment_calendar(
+                booking["appointment_id"],
+                calendar_event_id=result.event.event_id,
+                calendar_provider=result.provider,
+                status="confirmed",
+            )
+            return {
+                "calendar_synced": True,
+                "event_id": result.event.event_id,
+                "provider": result.provider,
+                "booking_url": result.event.booking_url,
+            }
+        else:
+            return {
+                "calendar_synced": False,
+                "error": result.error,
+                "provider": result.provider,
+            }
 
     def take_message(self, name: str, phone: str, message: str, confirmed: bool) -> dict[str, Any]:
         if confirmed is not True:
@@ -298,6 +435,59 @@ class ClinicTools:
             "status": "saved",
             "message": saved,
             "note": "Message saved for staff; delivery and response are not guaranteed.",
+        }
+
+    def escalate_urgent(
+        self,
+        caller_phone: str,
+        reason: str,
+        urgency_level: str,
+    ) -> dict[str, Any]:
+        """Flag an urgent situation for immediate staff attention."""
+        caller_phone = _phone(caller_phone)
+        reason = _text(reason, "reason", maximum=500)
+        if urgency_level not in {"emergency", "urgent", "high_priority"}:
+            raise ValueError("urgency_level must be emergency, urgent, or high_priority")
+
+        escalation = {
+            "call_id": self.call_id,
+            "caller_phone": caller_phone,
+            "reason": reason,
+            "urgency_level": urgency_level,
+            "timestamp": self._now().isoformat(),
+            "clinic_name": self.config.name,
+            "emergency_numbers": self.config.emergency_numbers,
+        }
+
+        self.store.create_escalation(
+            call_id=self.call_id,
+            caller_phone=caller_phone,
+            reason=reason,
+            urgency_level=urgency_level,
+        )
+
+        if self._on_escalation:
+            try:
+                self._on_escalation(escalation)
+            except Exception:
+                pass
+
+        self.escalation_sent = True
+
+        emergency_instruction = ""
+        if urgency_level == "emergency":
+            numbers = ", ".join(self.config.emergency_numbers[:3])
+            emergency_instruction = (
+                f" Tell the caller to hang up and call emergency services immediately: {numbers}."
+            )
+
+        return {
+            "status": "escalated",
+            "urgency_level": urgency_level,
+            "message": f"Staff has been alerted about this {urgency_level} situation.{emergency_instruction}",
+            "next_step": "Direct caller to emergency services if life-threatening, then end the call."
+            if urgency_level == "emergency"
+            else "Assure caller that staff will contact them shortly.",
         }
 
     def end_call(self, reason: str = "Caller finished the conversation") -> dict[str, Any]:

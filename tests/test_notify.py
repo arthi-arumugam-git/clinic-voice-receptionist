@@ -17,11 +17,13 @@ def summary():
                 "phone": "+15555550123",
                 "service_id": "cleaning",
                 "starts_at": "2030-10-28T14:00:00+00:00",
+                "status": "pending_confirmation",
             }
         ],
         "messages": [
             {"name": "Alex Demo", "phone": "+15555550123", "message": "Please call tomorrow."}
         ],
+        "escalations": [],
     }
 
 

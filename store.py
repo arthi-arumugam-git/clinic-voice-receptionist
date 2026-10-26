@@ -52,6 +52,8 @@ class Store:
                 ends_at TEXT NOT NULL,
                 notes TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'pending_confirmation',
+                calendar_event_id TEXT,
+                calendar_provider TEXT,
                 created_at TEXT NOT NULL,
                 UNIQUE(call_id, service_id, starts_at)
             );
@@ -65,6 +67,16 @@ class Store:
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 UNIQUE(call_id, name, phone, message)
+            );
+            CREATE TABLE IF NOT EXISTS escalations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id TEXT NOT NULL REFERENCES calls(call_id),
+                caller_phone TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                urgency_level TEXT NOT NULL,
+                notified_at TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(call_id, caller_phone, reason)
             );
         """)
         self._db.commit()
@@ -191,6 +203,59 @@ class Store:
                 ).fetchone()
             )
 
+    def create_escalation(
+        self,
+        *,
+        call_id: str,
+        caller_phone: str,
+        reason: str,
+        urgency_level: str,
+    ) -> dict[str, Any]:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR IGNORE INTO escalations(call_id,caller_phone,reason,urgency_level,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (call_id, caller_phone, reason, urgency_level, _utc_text(datetime.now(UTC))),
+            )
+            return dict(
+                self._db.execute(
+                    "SELECT * FROM escalations WHERE call_id = ? AND caller_phone = ? AND reason = ?",
+                    (call_id, caller_phone, reason),
+                ).fetchone()
+            )
+
+    def update_appointment_calendar(
+        self,
+        appointment_id: int,
+        *,
+        calendar_event_id: str,
+        calendar_provider: str,
+        status: str = "confirmed",
+    ) -> dict[str, Any]:
+        """Update an appointment with calendar event details after successful booking."""
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE appointments SET calendar_event_id = ?, calendar_provider = ?, status = ? "
+                "WHERE id = ?",
+                (calendar_event_id, calendar_provider, status, appointment_id),
+            )
+            row = self._db.execute(
+                "SELECT * FROM appointments WHERE id = ?", (appointment_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("unknown appointment_id")
+            return dict(row)
+
+    def list_escalations(self, call_id: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM escalations"
+                + (" WHERE call_id = ?" if call_id is not None else "")
+                + " ORDER BY id",
+                (call_id,) if call_id is not None else (),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def list_appointments(self, call_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
             query = "SELECT * FROM appointments"
@@ -221,4 +286,5 @@ class Store:
                 "call": dict(row),
                 "appointments": self.list_appointments(call_id),
                 "messages": self.list_messages(call_id),
+                "escalations": self.list_escalations(call_id),
             }

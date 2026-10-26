@@ -27,7 +27,7 @@ elevenlabs = ["pipecat-ai[elevenlabs]==1.14.0"]
 dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.13,<1"]
 
 [tool.setuptools]
-py-modules = ["bot", "config", "notify", "server", "settings", "store", "tools"]
+py-modules = ["bot", "calendars", "config", "notify", "server", "settings", "store", "tools"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

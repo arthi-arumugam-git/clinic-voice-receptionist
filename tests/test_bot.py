@@ -125,13 +125,18 @@ def session(monkeypatch):
     monkeypatch.setattr(pipeline_module, "Pipeline", FakePipeline)
     monkeypatch.setattr(worker_module, "PipelineWorker", FakeWorker)
     monkeypatch.setattr(runner_module, "WorkerRunner", FakeRunner)
-    monkeypatch.setattr(bot, "build_services", lambda config: ("stt", fixture.llm, "tts"))
+    monkeypatch.setattr(
+        bot, "build_services", lambda config, calendar_enabled=False: ("stt", fixture.llm, "tts")
+    )
     monkeypatch.setattr(bot, "send_summary", fixture.notify)
+    monkeypatch.setattr(
+        bot, "send_escalation_alert", AsyncMock(return_value={"sms": "skipped", "email": "skipped"})
+    )
     monkeypatch.setattr(bot, "max_call_seconds", lambda: 600)
     monkeypatch.setattr(
         bot,
         "ClinicTools",
-        lambda config, store, call_id: ClinicTools(
+        lambda config, store, call_id, calendar_service=None, on_escalation=None: ClinicTools(
             config, store, call_id, now=lambda: datetime(2027, 1, 4, 13, tzinfo=UTC)
         ),
     )
@@ -169,6 +174,7 @@ async def test_tools_goodbye_and_final_summary_use_one_server_owned_call(session
             "list_services",
             "book_appointment",
             "take_message",
+            "escalate_urgent",
             "end_call",
         }
         hours, properties = await session.call_tool("get_hours", {"day": "monday"})
@@ -266,7 +272,7 @@ async def test_runner_failures_are_finalized_before_propagating(session, excepti
 
 
 async def test_service_constructor_failure_still_finalizes_call(session, monkeypatch):
-    def fail_construction(config):
+    def fail_construction(config, calendar_enabled=False):
         raise ValueError("simulated configuration failure")
 
     monkeypatch.setattr(bot, "build_services", fail_construction)

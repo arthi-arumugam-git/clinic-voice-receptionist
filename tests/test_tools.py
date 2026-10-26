@@ -143,6 +143,7 @@ def test_tool_schemas_have_no_caller_controlled_session_id():
         "list_services",
         "book_appointment",
         "take_message",
+        "escalate_urgent",
         "end_call",
     }
     for item in TOOL_SCHEMAS:
